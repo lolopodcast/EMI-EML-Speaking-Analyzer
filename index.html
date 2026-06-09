@@ -1,0 +1,1157 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EMI Speaking Analyzer · ESA</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.6/purify.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Merriweather:ital,wght@0,400;0,700;1,400&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script>
+  tailwind.config = {
+    darkMode: 'class',
+    theme: { extend: { fontFamily: { sans: ['Inter','sans-serif'], serif: ['Merriweather','serif'] } } }
+  }
+</script>
+<style>
+  @keyframes fadeInUp { from{opacity:0;transform:translateY(15px)} to{opacity:1;transform:translateY(0)} }
+  .animate-fade-in { animation: fadeInUp 0.5s ease-out forwards; }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+  .dark ::-webkit-scrollbar-thumb { background: #475569; }
+  header, footer, button, [role="button"], .ui-decoration { -webkit-user-select: none; user-select: none; }
+  input, textarea, select { -webkit-user-select: text; user-select: text; }
+  body { overflow-x: hidden; }
+  .spin { animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body class="bg-[#f4f4f4] dark:bg-[#121212] text-slate-800 dark:text-slate-100 font-sans selection:bg-[#004030] selection:text-white dark:selection:bg-[#D8C3A5] dark:selection:text-[#004030]">
+<div id="root"></div>
+
+<script>
+/* ===== Front-end defence (smart protection) ===== */
+(function(){
+  const ALLOWED = ['lolopodcast.github.io','localhost','127.0.0.1'];
+  const isFile = location.protocol === 'file:';
+  const REDIRECT = 'https://www.ibs.ncnu.edu.tw/index.php/faculty/tenured-professor/299-smlo';
+  if (!isFile && !ALLOWED.some(d => location.hostname === d || location.hostname.endsWith('.'+d))) {
+    document.body.innerHTML = '<div style="text-align:center;padding:60px;font-family:sans-serif"><h1>Access Denied</h1><p>This resource is not authorised on this domain.</p></div>';
+    setTimeout(() => location.href = REDIRECT, 3000);
+    return;
+  }
+  if (window.self !== window.top) {
+    try { window.top.location.href = window.self.location.href; }
+    catch(e) { document.body.innerHTML = '<div style="text-align:center;padding:60px"><h1>Frame Blocked</h1><p>This content cannot be embedded.</p></div>'; }
+  }
+  let toastTimer = null;
+  window.__showCopyrightToast = function(){
+    let el = document.getElementById('__cpToast');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = '__cpToast';
+      el.style.cssText = 'position:fixed;bottom:48px;left:50%;transform:translateX(-50%);background:#004030;color:#D8C3A5;padding:10px 18px;border-radius:10px;font-family:sans-serif;font-size:13px;z-index:9999;box-shadow:0 6px 20px rgba(0,0,0,.3);opacity:0;transition:opacity .25s';
+      document.body.appendChild(el);
+    }
+    el.textContent = 'Intellectual Property of Prof. Shihmin Lo';
+    el.style.opacity = '1';
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(()=>{ el.style.opacity='0'; }, 2000);
+  };
+  document.addEventListener('contextmenu', e => {
+    const sel = window.getSelection().toString().trim();
+    const isImg = e.target.tagName === 'IMG' || (e.target.closest && e.target.closest('svg'));
+    if (sel.length > 0) return true;
+    if (isImg) { e.preventDefault(); window.__showCopyrightToast(); return; }
+    e.preventDefault(); window.__showCopyrightToast();
+  });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'F12') { e.preventDefault(); window.__showCopyrightToast(); return; }
+    if (e.ctrlKey && e.key.toLowerCase() === 'u') { e.preventDefault(); window.__showCopyrightToast(); return; }
+    if (e.ctrlKey && e.shiftKey && ['i','j','c'].includes(e.key.toLowerCase())) { e.preventDefault(); window.__showCopyrightToast(); return; }
+  });
+  document.addEventListener('dragstart', e => {
+    if (e.target.tagName === 'IMG' || (e.target.closest && e.target.closest('svg'))) e.preventDefault();
+  });
+})();
+</script>
+
+<script type="text/babel" data-presets="react">
+const { useState, useRef, useEffect, useMemo } = React;
+/* ============================================================
+   ANALYSIS ENGINE  (transcript + timing → EMI metrics)
+   Honest scope: discourse / fluency / pacing / lexis / cohesion.
+   Does NOT assess pronunciation, accent or intonation
+   (those require acoustic analysis, out of scope for a transcript-based tool).
+   ============================================================ */
+
+const CFG = {
+  IDEAL_WPM_LOW: 120,
+  IDEAL_WPM_HIGH: 160,
+  PAUSE_THRESHOLD: 0.7,      // seconds: gap counted as a pause
+  LONG_SENTENCE: 30,         // words: high cognitive load
+  FAST_SEG_WPM: 185,         // per-segment "too fast" flag
+  SLOW_SEG_WPM: 95           // per-segment "too slow" flag
+};
+
+const FILLERS = ['um','uh','er','ah','hmm','like','you know','i mean','sort of','kind of','basically','actually','literally','well','okay','right'];
+const CONNECTIVES = ['because','therefore','thus','however','although','though','while','since','so that','as a result','moreover','furthermore','in addition','consequently','despite','whereas','meanwhile','hence','nevertheless','for this reason','on the contrary'];
+const SIGNPOSTS = {
+  opening:    ['today','this presentation','i will discuss','i am going to','i\'m going to','i would like to talk','i\'d like to talk','let me start','let me begin','my topic'],
+  sequencing: ['first','firstly','secondly','second','thirdly','third','next','then','finally','lastly','to begin'],
+  transition: ['moving on','let\'s move on','let us move on','turning to','now let\'s','now i','on the other hand','in contrast','let me turn'],
+  example:    ['for example','for instance','such as','to illustrate','as you can see','let me give you an example'],
+  emphasis:   ['importantly','the key point','what matters','crucially','i want to stress','note that','keep in mind'],
+  closing:    ['in conclusion','to conclude','to summarize','to summarise','in summary','to sum up','overall','in short']
+};
+
+const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
+const round1 = v => Math.round(v*10)/10;
+
+function countPhrase(textLower, phrase){
+  if (phrase.indexOf(' ') === -1){
+    const re = new RegExp('\\b'+phrase.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'\\b','g');
+    return (textLower.match(re)||[]).length;
+  }
+  let i=0,c=0,p=textLower.indexOf(phrase);
+  while(p!==-1){c++;i=p+phrase.length;p=textLower.indexOf(phrase,i);}
+  return c;
+}
+
+function analyze(asr){
+  // asr: { text, chunks:[{text, timestamp:[start,end]}] }
+  const chunks = (asr.chunks||[]).filter(c=>c.timestamp && c.timestamp[0]!=null);
+  const fullText = (asr.text||'').trim();
+  const lower = ' ' + fullText.toLowerCase().replace(/[^a-z0-9'\s]/g,' ').replace(/\s+/g,' ') + ' ';
+
+  // duration
+  let duration = 0;
+  if (chunks.length){
+    const last = chunks[chunks.length-1].timestamp;
+    duration = last[1] || last[0] || 0;
+  }
+  if (asr.__audioDuration && asr.__audioDuration > duration) duration = asr.__audioDuration;
+  duration = Math.max(duration, 0.1);
+
+  // tokens
+  const tokens = (fullText.toLowerCase().match(/[a-z']+/g)||[]);
+  const totalWords = tokens.length;
+  const types = new Set(tokens).size;
+  const wpm = totalWords / (duration/60);
+
+  // fillers (lexical only — Whisper drops most "um/uh")
+  let fillerCount = 0;
+  const fillerHits = {};
+  FILLERS.forEach(f=>{ const n=countPhrase(lower,f); if(n){fillerHits[f]=n; fillerCount+=n;} });
+  const fillerPer100 = totalWords ? fillerCount/totalWords*100 : 0;
+
+  // pauses between chunks
+  let pauseCount=0, pauseSec=0; const pauseMarks=[];
+  for (let i=1;i<chunks.length;i++){
+    const gap = chunks[i].timestamp[0] - chunks[i-1].timestamp[1];
+    if (gap >= CFG.PAUSE_THRESHOLD){ pauseCount++; pauseSec+=gap; pauseMarks.push({at:chunks[i-1].timestamp[1], len:gap}); }
+  }
+  const pauseRatio = pauseSec/duration;
+
+  // signposting coverage
+  const signpost = {}; let catPresent=0;
+  Object.keys(SIGNPOSTS).forEach(cat=>{
+    let hit=0; SIGNPOSTS[cat].forEach(p=>{ hit += countPhrase(lower,p); });
+    signpost[cat]=hit; if(hit>0) catPresent++;
+  });
+
+  // connectives (cohesion)
+  let connCount=0; CONNECTIVES.forEach(c=>{ connCount += countPhrase(lower,c); });
+  const connPer100 = totalWords ? connCount/totalWords*100 : 0;
+
+  // sentences
+  const sents = fullText.split(/[.!?]+/).map(s=>s.trim()).filter(Boolean);
+  const sentLens = sents.map(s=>(s.match(/[a-z']+/gi)||[]).length).filter(n=>n>0);
+  const avgSent = sentLens.length ? sentLens.reduce((a,b)=>a+b,0)/sentLens.length : 0;
+  const longSent = sentLens.filter(n=>n>CFG.LONG_SENTENCE).length;
+
+  // lexical richness — Guiraud index (length-stable): types / sqrt(tokens)
+  const guiraud = totalWords ? types/Math.sqrt(totalWords) : 0;
+
+  /* ---- five EMI dimensions (0–10) ---- */
+  // 1 Fluency: penalise fillers + excessive pausing
+  const sFluency = clamp(10 - clamp(fillerPer100-2,0,6)*0.9 - clamp(pauseRatio*100-12,0,40)*0.12, 0, 10);
+  // 2 Pacing: closeness to intelligible EMI band
+  let sPacing;
+  if (wpm>=CFG.IDEAL_WPM_LOW && wpm<=CFG.IDEAL_WPM_HIGH) sPacing=10;
+  else if (wpm<CFG.IDEAL_WPM_LOW) sPacing=clamp(10-(CFG.IDEAL_WPM_LOW-wpm)/6,0,10);
+  else sPacing=clamp(10-(wpm-CFG.IDEAL_WPM_HIGH)/8,0,10);
+  // 3 Discourse structure: signpost category coverage (of 6) + light bonus
+  const sStructure = clamp(catPresent/6*9 + Math.min(catPresent,2)*0.5, 0, 10);
+  // 4 Lexical richness
+  const sLexis = clamp((guiraud-4)/(9-4)*10, 0, 10);
+  // 5 Cohesion: connective density (ideal ~3–7 /100w) with a gentle long-sentence load
+  let cohBase;
+  if (connPer100>=3 && connPer100<=7) cohBase=10;
+  else if (connPer100<3) cohBase=clamp(3 + connPer100/3*7, 3, 10);   // 0 connectives → 3, not 0
+  else cohBase=clamp(10-(connPer100-7)*0.6, 5, 10);
+  const sCoh = clamp(cohBase - clamp(longSent-2,0,8)*0.4, 0, 10);    // penalty only after 2 long sentences
+
+  const dims = [
+    { key:'fluency',   score:round1(sFluency) },
+    { key:'pacing',    score:round1(sPacing) },
+    { key:'structure', score:round1(sStructure) },
+    { key:'lexis',     score:round1(sLexis) },
+    { key:'cohesion',  score:round1(sCoh) }
+  ];
+  const overall = round1(dims.reduce((a,d)=>a+d.score,0)/dims.length);
+
+  /* ---- per-segment metrics + rule-based feedback ---- */
+  const segments = chunks.map((c,i)=>{
+    const st=c.timestamp[0], en=c.timestamp[1]||st;
+    const w=(c.text.toLowerCase().match(/[a-z']+/g)||[]).length;
+    const dur=Math.max(en-st,0.01);
+    const segWpm=w/(dur/60);
+    const precededPause = i>0 ? (st - chunks[i-1].timestamp[1]) : 0;
+    const flags=[];
+    if (segWpm>CFG.FAST_SEG_WPM) flags.push('fast');
+    if (w>=3 && segWpm<CFG.SLOW_SEG_WPM) flags.push('slow');
+    if (precededPause>=1.2) flags.push('pause');
+    let lf=0; FILLERS.forEach(f=>{ lf+=countPhrase(' '+c.text.toLowerCase()+' ',f); });
+    if (lf>0) flags.push('filler');
+    return { i, st, en, text:c.text.trim(), wpm:Math.round(segWpm), words:w, precededPause:round1(precededPause), flags };
+  });
+
+  return {
+    fullText, duration: round1(duration),
+    totalWords, types, wpm: Math.round(wpm),
+    fillerCount, fillerPer100: round1(fillerPer100), fillerHits,
+    pauseCount, pauseSec: round1(pauseSec), pauseRatio: round1(pauseRatio*100), pauseMarks,
+    signpost, catPresent, connCount, connPer100: round1(connPer100),
+    sentCount: sents.length, avgSent: round1(avgSent), longSent,
+    guiraud: round1(guiraud),
+    dims, overall, segments
+  };
+}
+
+/* ---- audio decode + resample to 16 kHz mono ---- */
+async function decodeTo16k(file){
+  const buf = await file.arrayBuffer();
+  const AC = window.AudioContext || window.webkitAudioContext;
+  const ctx = new AC();
+  const decoded = await ctx.decodeAudioData(buf.slice(0));
+  ctx.close && ctx.close();
+  const len16 = Math.ceil(decoded.length * 16000 / decoded.sampleRate);
+  const off = new OfflineAudioContext(1, len16, 16000);
+  const src = off.createBufferSource();
+  src.buffer = decoded;
+  src.connect(off.destination);
+  src.start(0);
+  const rendered = await off.startRendering();
+  // peaks for waveform (downsample original)
+  const orig = decoded.getChannelData(0);
+  const BARS = 600;
+  const block = Math.floor(orig.length/BARS) || 1;
+  const peaks = new Array(BARS).fill(0);
+  for (let i=0;i<BARS;i++){
+    let max=0; const s=i*block;
+    for (let j=0;j<block;j++){ const v=Math.abs(orig[s+j]||0); if(v>max)max=v; }
+    peaks[i]=max;
+  }
+  return { audio16k: rendered.getChannelData(0), duration: decoded.duration, peaks };
+}
+
+// dynamic import that Babel will not rewrite
+const dynImport = (url) => new Function('u','return import(u)')(url);
+
+let __pipe = null, __pipeName = null;
+async function transcribe(audio16k, modelId, onProgress){
+  const lib = await dynImport('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2');
+  lib.env.allowLocalModels = false;
+  lib.env.useBrowserCache = true;
+  if (!__pipe || __pipeName !== modelId){
+    __pipe = await lib.pipeline('automatic-speech-recognition', modelId, {
+      quantized: true,
+      progress_callback: (p)=>{ if(p && p.status==='progress' && p.file && /\.onnx/.test(p.file)) onProgress(Math.round(p.progress||0)); }
+    });
+    __pipeName = modelId;
+  }
+  const out = await __pipe(audio16k, {
+    chunk_length_s: 30,
+    stride_length_s: 5,
+    return_timestamps: true
+  });
+  return out;
+}
+/* ===================== BILINGUAL DICT ===================== */
+const DICT = {
+  en: {
+    brand:'ESA', title:'EMI Speaking Analyzer',
+    date:'Version 2026.06.09', copyright:'For Educational Use Only',
+    architect_url:'https://www.ibs.ncnu.edu.tw/index.php/faculty/tenured-professor/299-smlo',
+    nav:['Home','Upload & Transcribe','Scorecard','Timeline & Segments','Detailed Feedback','Methodology'],
+    home_hero:'Upload an English speaking recording and receive an EMI-oriented analysis of fluency, pacing, discourse structure, lexical richness and cohesion.',
+    home_lead:'An EMI-oriented speaking analytics workstation',
+    home_body:'This tool focuses on what matters most for English-Medium Instruction: international intelligibility, pacing, and discourse organisation — not accent correction. All processing happens inside your browser. Your audio is transcribed locally using an in-browser Whisper model; the file is never uploaded to any server.',
+    home_privacy:'100% in-browser. Your audio never leaves this device.',
+    home_scope_t:'What it measures · What it does not',
+    home_does:['Fluency (fillers + pausing)','Pacing / speech rate (WPM)','Discourse structure (signposting)','Lexical richness','Cohesion (connectives, sentence load)'],
+    home_doesnot:['Pronunciation accuracy','Accent / phoneme errors','Intonation contour','Stress patterns'],
+    home_doesnot_note:'These require acoustic / phonetic analysis (pitch tracking, forced alignment) and are out of scope for a transcript-based tool.',
+    home_start:'Start → Upload a recording',
+    stat_inbrowser:'In-browser', stat_inbrowser_d:'No server, no upload',
+    stat_dims:'5 dimensions', stat_dims_d:'EMI-oriented scoring',
+    stat_free:'Free tools', stat_free_d:'Whisper + Web Audio',
+
+    up_title:'Upload & Transcribe', up_icon_label:'1',
+    up_desc:'Select an MP3/WAV/M4A recording. The first run downloads a small Whisper model (~40–80 MB) to your browser cache; later runs are faster. Chrome or Edge recommended.',
+    up_choose:'Choose audio file', up_model:'Model', up_model_tiny:'Tiny — fastest', up_model_base:'Base — more accurate (slower)',
+    up_run:'Transcribe & Analyze', up_running:'Working…', up_dl:'Downloading model',
+    up_decode:'Decoding audio…', up_transcribe:'Transcribing in browser…', up_analyze:'Computing metrics…',
+    up_done:'Analysis complete — see Scorecard.', up_err:'Something went wrong. Use Chrome/Edge, check your connection, and try a shorter clip.',
+    up_filehint:'Best results: 30 s – 5 min, one speaker, clear recording.',
+    up_toobig:'Large file — long recordings use more memory and take longer in-browser. Keep it under ~10 min for a smooth run.',
+    up_transcript:'Transcript', up_nofile:'No file selected yet.',
+    up_follow_hint:'Plays along with the audio — the current line is highlighted and the view scrolls to follow. Click any line to jump there.',
+    rec_title:'Or record live', rec_max:'Max 3 min',
+    rec_hint:'Record straight from your microphone — up to 3 minutes. Short beeps warn at 30 s, 10 s and 3 s remaining (1 / 2 / 3 beeps). Needs https (or localhost) and mic permission.',
+    rec_start:'Record', rec_pause:'Pause', rec_resume:'Resume', rec_stop:'Stop',
+    rec_discard:'Discard', rec_save:'Save', rec_recording:'Recording', rec_paused:'Paused',
+    rec_remaining:'remaining', rec_saved:'Recording saved — press “Transcribe & Analyze”.',
+    rec_denied:'Microphone access was blocked. Allow mic permission and open over https (or localhost).',
+    sc_goto:'View scorecard →',
+    up_note:'Note: Whisper cleans most "um/uh" disfluencies, so filler counts reflect lexical fillers (like, you know, basically…) and may understate vocalised hesitation.',
+
+    sc_title:'Scorecard', sc_desc:'Five EMI-oriented dimensions, each scored 0–10 from your transcript and timing. Hover or read the basis under each bar — every score is transparent, not a black box.',
+    sc_overall:'Overall EMI Speaking Score', sc_none:'Run an analysis first (Upload & Transcribe).',
+    dim_fluency:'Fluency', dim_pacing:'Pacing', dim_structure:'Discourse Structure', dim_lexis:'Lexical Richness', dim_cohesion:'Cohesion',
+    dim_fluency_b:'Based on filler density and excessive pausing.',
+    dim_pacing_b:'Closeness to the intelligible EMI band (120–160 WPM).',
+    dim_structure_b:'Coverage of signposting categories (opening, sequencing, transition, example, emphasis, closing).',
+    dim_lexis_b:'Guiraud index — vocabulary variety adjusted for length.',
+    dim_cohesion_b:'Connective density and sentence-length load.',
+    sc_metrics:'Key metrics',
+    m_words:'Words', m_dur:'Duration', m_wpm:'Speech rate', m_wpm_u:'WPM',
+    m_filler:'Fillers', m_filler_u:'per 100 words', m_pause:'Pauses', m_pause_u:'count',
+    m_pauseratio:'Pause ratio', m_ttr:'Vocabulary (Guiraud)', m_conn:'Connectives', m_conn_u:'per 100 words',
+    m_sent:'Sentences', m_avgsent:'Avg words/sentence', m_long:'Long sentences', m_signpost:'Signpost categories',
+
+    tl_title:'Timeline & Segments', tl_desc:'Click the waveform to seek. The segment table flags fast pace, long pauses and fillers. Click a row to play that segment.',
+    tl_play:'Play', tl_pause:'Pause', tl_legend:'Flags', tl_fast:'Fast pace', tl_slow:'Slow pace', tl_pauseflag:'Long pause', tl_fillerflag:'Filler',
+    tl_seg:'Segment', tl_time:'Time', tl_wpm:'WPM', tl_text:'Transcript', tl_flags:'Flags', tl_none:'Run an analysis to see the timeline.',
+    tl_edit:'Edit transcript', tl_doneedit:'Done editing', tl_editing:'Editing — correct any text (the tail is often where errors are), then re-analyze.',
+    tl_reanalyze:'Re-analyze', tl_srt:'Export SRT', tl_reanalyzed:'Re-analyzed with your edits.',
+    tl_stop:'Stop', tl_editedat:'Edited', tl_total:'Total', tl_viewscore:'View scorecard →',
+
+    fb_title:'Detailed Feedback', fb_desc:'Automated, rule-based feedback derived from the metrics. Treat it as a prompt for reflection, not a verdict.',
+    fb_strength:'Strengths', fb_improve:'Priorities to improve', fb_signpost:'Signposting checklist', fb_present:'present', fb_missing:'not detected',
+    fb_none:'Run an analysis to see feedback.',
+
+    me_title:'Methodology', me_desc:'Full transparency on how every number is produced — so you can defend the scores to students and colleagues.',
+    me_engine:'Engine', me_engine_b:'Audio is decoded with the Web Audio API, resampled to 16 kHz mono, and transcribed by an in-browser Whisper model (transformers.js, WASM). Nothing is sent to a server.',
+    me_band:'Intelligibility band', me_band_b:'120–160 WPM is treated as the comfortable range for non-native EMI audiences; faster speech raises listener cognitive load.',
+    me_limits:'Limitations', me_limits_b:'Transcript-based analysis cannot judge pronunciation, accent, intonation or stress. Whisper removes most vocalised fillers. Automatic transcription may contain errors, especially with strong background noise. Scores are indicative, not certification.',
+    me_formulas:'Scoring formulas',
+
+    tts_play:'Read section', tts_stop:'Stop', lang_btn:'中', theme_btn:'Theme',
+    nav_prev:'← Previous', nav_next:'Next →', top:'Top ↑'
+  },
+  zh: {
+    brand:'ESA', title:'EMI 英語口說分析儀',
+    date:'Version 2026.06.09', copyright:'For Educational Use Only',
+    architect_url:'https://www.ibs.ncnu.edu.tw/index.php/faculty/tenured-professor/299-smlo',
+    nav:['首頁','上傳與轉錄','評分卡','時間軸與分段','詳細回饋','方法論'],
+    home_hero:'上傳一段英語口說錄音，即可獲得 EMI 取向的分析：流暢度、語速、論述結構、詞彙豐富度與連貫性。',
+    home_lead:'EMI 取向的口說學習分析工作站',
+    home_body:'本工具聚焦 EMI（全英語授課）最關鍵的面向：國際可理解性、語速與論述組織，而非口音矯正。所有運算都在你的瀏覽器內完成：錄音以瀏覽器內建的 Whisper 模型在本機轉錄，檔案不會上傳到任何伺服器。',
+    home_privacy:'100% 在瀏覽器內運算，錄音不離開本機。',
+    home_scope_t:'量測什麼 · 不量測什麼',
+    home_does:['流暢度（填充詞 + 停頓）','語速（每分鐘字數 WPM）','論述結構（signposting）','詞彙豐富度','連貫性（連接詞、句長負荷）'],
+    home_doesnot:['發音準確度','口音／音素錯誤','語調曲線','重音模式'],
+    home_doesnot_note:'這些需要聲學／語音分析（音高追蹤、強制對位），不在以逐字稿為基礎的工具範圍內。',
+    home_start:'開始 → 上傳錄音',
+    stat_inbrowser:'瀏覽器內', stat_inbrowser_d:'無伺服器、不上傳',
+    stat_dims:'五大構面', stat_dims_d:'EMI 取向評分',
+    stat_free:'免費工具', stat_free_d:'Whisper + Web Audio',
+
+    up_title:'上傳與轉錄', up_icon_label:'1',
+    up_desc:'選擇一段 MP3／WAV／M4A 錄音。首次執行會下載一個小型 Whisper 模型（約 40–80 MB）到瀏覽器快取，之後會更快。建議使用 Chrome 或 Edge。',
+    up_choose:'選擇音訊檔', up_model:'模型', up_model_tiny:'Tiny — 最快', up_model_base:'Base — 較準確（較慢）',
+    up_run:'轉錄並分析', up_running:'處理中…', up_dl:'下載模型中',
+    up_decode:'解碼音訊中…', up_transcribe:'瀏覽器內轉錄中…', up_analyze:'計算指標中…',
+    up_done:'分析完成——請看評分卡。', up_err:'發生錯誤。請改用 Chrome／Edge、檢查網路連線，並嘗試較短的片段。',
+    up_filehint:'最佳效果：30 秒 – 5 分鐘、單一講者、清晰錄音。',
+    up_toobig:'檔案較大——長錄音會用較多記憶體、瀏覽器內處理也較久。建議控制在約 10 分鐘以內以順暢執行。',
+    up_transcript:'逐字稿', up_nofile:'尚未選擇檔案。',
+    up_follow_hint:'會隨音訊播放即時標示目前段落並自動向上滾動追隨；點任一行可跳至該處。',
+    rec_title:'或線上錄音', rec_max:'上限 3 分鐘',
+    rec_hint:'直接以麥克風錄音——上限 3 分鐘。剩餘 30／10／3 秒時會以短嗶聲提醒（1／2／3 聲）。需使用 https（或 localhost）並允許麥克風權限。',
+    rec_start:'開始錄音', rec_pause:'暫停', rec_resume:'繼續', rec_stop:'停止',
+    rec_discard:'放棄', rec_save:'儲存', rec_recording:'錄音中', rec_paused:'已暫停',
+    rec_remaining:'剩餘', rec_saved:'錄音已儲存——請按「轉錄並分析」。',
+    rec_denied:'麥克風存取被拒。請允許麥克風權限，並以 https（或 localhost）開啟。',
+    sc_goto:'查看評分細項 →',
+    up_note:'說明：Whisper 會清掉大多數「um／uh」等口語遲疑，因此填充詞數量反映的是詞彙型填充詞（like、you know、basically…），可能低估發聲遲疑。',
+
+    sc_title:'評分卡', sc_desc:'五個 EMI 取向構面，各以逐字稿與時間資料評為 0–10 分。每個分數下方都標明計分基礎，完全透明、非黑箱。',
+    sc_overall:'EMI 口說總分', sc_none:'請先執行一次分析（上傳與轉錄）。',
+    dim_fluency:'流暢度', dim_pacing:'語速', dim_structure:'論述結構', dim_lexis:'詞彙豐富度', dim_cohesion:'連貫性',
+    dim_fluency_b:'依填充詞密度與過度停頓計算。',
+    dim_pacing_b:'與可理解 EMI 區間（120–160 WPM）的接近程度。',
+    dim_structure_b:'signposting 類別涵蓋度（開場、排序、轉折、舉例、強調、收尾）。',
+    dim_lexis_b:'Guiraud 指數——經長度校正的詞彙多樣性。',
+    dim_cohesion_b:'連接詞密度與句長負荷。',
+    sc_metrics:'關鍵指標',
+    m_words:'總字數', m_dur:'時長', m_wpm:'語速', m_wpm_u:'WPM',
+    m_filler:'填充詞', m_filler_u:'每百字', m_pause:'停頓', m_pause_u:'次數',
+    m_pauseratio:'停頓比例', m_ttr:'詞彙（Guiraud）', m_conn:'連接詞', m_conn_u:'每百字',
+    m_sent:'句數', m_avgsent:'平均每句字數', m_long:'長句數', m_signpost:'signpost 類別數',
+
+    tl_title:'時間軸與分段', tl_desc:'點擊波形可跳轉。分段表會標記語速過快、長停頓與填充詞。點一列即可播放該段。',
+    tl_play:'播放', tl_pause:'暫停', tl_legend:'標記', tl_fast:'語速快', tl_slow:'語速慢', tl_pauseflag:'長停頓', tl_fillerflag:'填充詞',
+    tl_seg:'段', tl_time:'時間', tl_wpm:'WPM', tl_text:'逐字稿', tl_flags:'標記', tl_none:'執行分析後可看到時間軸。',
+    tl_edit:'編輯逐字稿', tl_doneedit:'完成編輯', tl_editing:'編輯中——修正任何文字（結尾通常最容易出錯），完成後重新評分。',
+    tl_reanalyze:'重新評分', tl_srt:'匯出 SRT', tl_reanalyzed:'已依你的修改重新評分。',
+    tl_stop:'停止', tl_editedat:'完成編輯於', tl_total:'總分', tl_viewscore:'查看評分細項 →',
+
+    fb_title:'詳細回饋', fb_desc:'依指標自動產生的規則式回饋。請當作反思的提示，而非定論。',
+    fb_strength:'優點', fb_improve:'優先改善項目', fb_signpost:'Signposting 檢核表', fb_present:'有出現', fb_missing:'未偵測到',
+    fb_none:'執行分析後可看到回饋。',
+
+    me_title:'方法論', me_desc:'完整公開每個數字的產生方式——讓你能向學生與同事說明這些分數的依據。',
+    me_engine:'引擎', me_engine_b:'音訊以 Web Audio API 解碼、重新取樣為 16 kHz 單聲道，並由瀏覽器內的 Whisper 模型（transformers.js、WASM）轉錄。完全不傳送到伺服器。',
+    me_band:'可理解區間', me_band_b:'120–160 WPM 視為非母語 EMI 聽眾的舒適區間；語速過快會提高聽者的認知負荷。',
+    me_limits:'限制', me_limits_b:'以逐字稿為基礎的分析無法評斷發音、口音、語調或重音。Whisper 會移除大多數發聲填充詞。自動轉錄可能有誤，尤其在背景噪音強時。分數僅供參考，非檢定認證。',
+    me_formulas:'計分公式',
+
+    tts_play:'朗讀本頁', tts_stop:'停止', lang_btn:'EN', theme_btn:'主題',
+    nav_prev:'← 上一頁', nav_next:'下一頁 →', top:'回頂端 ↑'
+  }
+};
+
+const MODELS = { tiny:'Xenova/whisper-tiny.en', base:'Xenova/whisper-base.en' };
+
+/* ===================== ICONS ===================== */
+const Ic = {
+  menu:()=> <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>,
+  home:(p)=>{ const s=(typeof p==='number')?p:18; return <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>; },
+  upload:()=> <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>,
+  chart:()=> <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2a10 10 0 1 0 10 10"/><path d="M12 12L12 2"/><path d="M12 12l8.5 5"/></svg>,
+  wave:()=> <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="3" y1="12" x2="3" y2="12"/><line x1="6" y1="8" x2="6" y2="16"/><line x1="9" y1="5" x2="9" y2="19"/><line x1="12" y1="9" x2="12" y2="15"/><line x1="15" y1="4" x2="15" y2="20"/><line x1="18" y1="7" x2="18" y2="17"/><line x1="21" y1="11" x2="21" y2="13"/></svg>,
+  fb:()=> <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>,
+  book:()=> <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>,
+  sun:()=> <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.2" y1="4.2" x2="5.6" y2="5.6"/><line x1="18.4" y1="18.4" x2="19.8" y2="19.8"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.2" y1="19.8" x2="5.6" y2="18.4"/><line x1="18.4" y1="5.6" x2="19.8" y2="4.2"/></svg>,
+  moon:()=> <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z"/></svg>,
+  play:()=> <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><polygon points="6 4 20 12 6 20"/></svg>,
+  pause:()=> <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>,
+  stop:()=> <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>
+};
+const NAV_ICONS = [Ic.home, Ic.upload, Ic.chart, Ic.wave, Ic.fb, Ic.book];
+/* ===================== VISUAL COMPONENTS ===================== */
+function RadarChart({dims, t}){
+  const labels = { fluency:t.dim_fluency, pacing:t.dim_pacing, structure:t.dim_structure, lexis:t.dim_lexis, cohesion:t.dim_cohesion };
+  const N = dims.length, cx=160, cy=160, R=110;
+  const pt = (i, r) => {
+    const ang = -Math.PI/2 + i*2*Math.PI/N;
+    return [cx + r*Math.cos(ang), cy + r*Math.sin(ang)];
+  };
+  const grid = [2,4,6,8,10].map(g => dims.map((_,i)=>pt(i, R*g/10).join(',')).join(' '));
+  const poly = dims.map((d,i)=>pt(i, R*d.score/10).join(',')).join(' ');
+  return (
+    <div onContextMenu={e=>{e.preventDefault(); window.__showCopyrightToast&&window.__showCopyrightToast();}}>
+      <svg viewBox="0 0 320 340" className="w-full max-w-[360px] mx-auto" draggable="false">
+        {grid.map((g,i)=><polygon key={i} points={g} fill="none" stroke="currentColor" strokeOpacity="0.15"/>)}
+        {dims.map((d,i)=>{const[x,y]=pt(i,R);return <line key={i} x1={cx} y1={cy} x2={x} y2={y} stroke="currentColor" strokeOpacity="0.15"/>;})}
+        <polygon points={poly} fill="#004030" fillOpacity="0.30" stroke="#004030" strokeWidth="2" className="dark:fill-[#D8C3A5] dark:stroke-[#D8C3A5]"/>
+        {dims.map((d,i)=>{const[x,y]=pt(i,R*d.score/10);return <circle key={i} cx={x} cy={y} r="3" fill="#004030" className="dark:fill-[#D8C3A5]"/>;})}
+        {dims.map((d,i)=>{
+          const[x,y]=pt(i,R+24);
+          return <text key={i} x={x} y={y} textAnchor="middle" dominantBaseline="middle" fontSize="11" fontWeight="600" fill="currentColor">{labels[d.key]} {d.score}</text>;
+        })}
+      </svg>
+    </div>
+  );
+}
+
+function Waveform({peaks, pauseMarks, duration, currentTime, onSeek}){
+  const ref = useRef(null);
+  useEffect(()=>{
+    const cv=ref.current; if(!cv||!peaks) return;
+    const dpr=window.devicePixelRatio||1;
+    const w=cv.clientWidth, h=cv.clientHeight;
+    cv.width=w*dpr; cv.height=h*dpr;
+    const ctx=cv.getContext('2d'); ctx.scale(dpr,dpr); ctx.clearRect(0,0,w,h);
+    const isDark=document.documentElement.classList.contains('dark');
+    const mid=h/2, bw=w/peaks.length;
+    // pause shading
+    if(duration){ ctx.fillStyle=isDark?'rgba(216,195,165,0.12)':'rgba(0,64,48,0.08)';
+      (pauseMarks||[]).forEach(p=>{ const x=(p.at/duration)*w, ww=Math.max((p.len/duration)*w,1); ctx.fillRect(x,0,ww,h); });
+    }
+    const prog=duration?(currentTime/duration):0;
+    for(let i=0;i<peaks.length;i++){
+      const bh=Math.max(peaks[i]*h*0.9,1);
+      const played=(i/peaks.length)<prog;
+      ctx.fillStyle=played?(isDark?'#D8C3A5':'#004030'):(isDark?'#475569':'#cbd5e1');
+      ctx.fillRect(i*bw, mid-bh/2, Math.max(bw-0.5,0.5), bh);
+    }
+  },[peaks,currentTime,duration,pauseMarks]);
+  return <canvas ref={ref} onClick={e=>{const r=e.currentTarget.getBoundingClientRect(); onSeek(((e.clientX-r.left)/r.width)*duration);}}
+    className="w-full h-24 rounded-lg bg-slate-100 dark:bg-slate-900 cursor-pointer border border-slate-200 dark:border-slate-700"/>;
+}
+
+function ScoreBar({label, score, basis}){
+  const pct=score*10;
+  const col = score>=7.5?'bg-emerald-500':score>=5?'bg-amber-500':'bg-rose-500';
+  return (
+    <div className="mb-4">
+      <div className="flex justify-between items-baseline mb-1">
+        <span className="font-semibold text-sm">{label}</span>
+        <span className="font-serif font-black text-lg text-[#004030] dark:text-[#D8C3A5]">{score}<span className="text-xs text-slate-400">/10</span></span>
+      </div>
+      <div className="h-2.5 w-full rounded-full bg-slate-200 dark:bg-slate-700 overflow-hidden">
+        <div className={`h-full rounded-full ${col} transition-all duration-700`} style={{width:pct+'%'}}/>
+      </div>
+      <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">{basis}</p>
+    </div>
+  );
+}
+
+function Metric({label, value, unit}){
+  return (
+    <div className="bg-white dark:bg-slate-800 rounded-xl p-3 border border-slate-200 dark:border-slate-700">
+      <div className="text-[11px] uppercase tracking-wide text-slate-500 dark:text-slate-400">{label}</div>
+      <div className="font-serif font-black text-xl text-[#004030] dark:text-[#D8C3A5] mt-0.5">{value}<span className="text-xs font-sans font-normal text-slate-400 ml-1">{unit}</span></div>
+    </div>
+  );
+}
+
+const fmtTime = s => { s=Math.max(0,Math.round(s||0)); const m=Math.floor(s/60); return m+':'+String(s%60).padStart(2,'0'); };
+
+/* ---- feedback generation (rule-based, bilingual) ---- */
+function buildFeedback(r, lang){
+  const S=[], I=[];
+  const en = lang==='en';
+  const D=Object.fromEntries(r.dims.map(d=>[d.key,d.score]));
+  // strengths
+  if(D.pacing>=8) S.push(en?`Well-paced at ${r.wpm} WPM — comfortable for non-native listeners.`:`語速得宜（${r.wpm} WPM），對非母語聽眾相當舒適。`);
+  if(D.structure>=7) S.push(en?`Clear signposting across ${r.catPresent} of 6 categories.`:`論述標示清楚，涵蓋 6 類中的 ${r.catPresent} 類。`);
+  if(D.lexis>=7.5) S.push(en?`Rich, varied vocabulary (Guiraud ${r.guiraud}).`:`詞彙豐富多樣（Guiraud ${r.guiraud}）。`);
+  if(D.fluency>=8) S.push(en?'Smooth delivery with few fillers and well-controlled pausing.':'表達順暢，填充詞少、停頓控制得宜。');
+  if(D.cohesion>=7.5) S.push(en?`Good cohesion (${r.connPer100} connectives per 100 words).`:`連貫性佳（每百字 ${r.connPer100} 個連接詞）。`);
+  if(!S.length) S.push(en?'A complete, analysable sample was produced — a solid baseline to build on.':'已產出完整可分析的樣本，是後續精進的良好基準。');
+  // priorities
+  if(D.pacing<6){ I.push(r.wpm>160 ? (en?`Slow down — ${r.wpm} WPM is fast for an EMI audience; aim for 120–160.`:`放慢——${r.wpm} WPM 對 EMI 聽眾偏快；建議 120–160。`) : (en?`Lift the pace slightly — ${r.wpm} WPM is on the slow side.`:`稍微加快——${r.wpm} WPM 偏慢。`)); }
+  if(D.fluency<6) I.push(en?`Reduce fillers (${r.fillerPer100}/100w) and long pauses (pause ratio ${r.pauseRatio}%).`:`減少填充詞（每百字 ${r.fillerPer100}）與長停頓（停頓比例 ${r.pauseRatio}%）。`);
+  if(D.structure<6){ const miss=Object.keys(r.signpost).filter(k=>r.signpost[k]===0); I.push(en?`Add explicit signposting — missing: ${miss.join(', ')}.`:`增加明確的論述標示——缺少：${miss.join('、')}。`); }
+  if(D.cohesion<6) I.push(en?'Connect ideas with more linking words (because, however, therefore) and shorten very long sentences.':'用更多連接詞（because、however、therefore）串連觀點，並縮短過長句子。');
+  if(D.lexis<6) I.push(en?'Widen vocabulary range; avoid repeating the same content words.':'擴大詞彙範圍，避免重複相同的實詞。');
+  if(r.longSent>=3) I.push(en?`${r.longSent} sentences exceed 30 words — high cognitive load; break them up.`:`有 ${r.longSent} 句超過 30 字——認知負荷高，建議拆短。`);
+  if(!I.length) I.push(en?'No major issues detected — focus on delivery polish and emphasis.':'未偵測到重大問題——可專注於表達細緻度與重點強調。');
+  return {S,I};
+}
+/* ---- karaoke-style transcript that follows playback ---- */
+function FollowTranscript({segs, curTime, onSeek}){
+  const contRef=useRef(null), activeRef=useRef(null);
+  let active=-1;
+  for(let i=0;i<segs.length;i++){ if(curTime>=segs[i].st && curTime<(segs[i].en||segs[i].st)){ active=i; break; } }
+  if(active===-1 && segs.length && curTime>= (segs[segs.length-1].en||0)) active=segs.length-1;
+  useEffect(()=>{
+    const c=contRef.current, el=activeRef.current;
+    if(c&&el){
+      const top=el.offsetTop - c.offsetTop;
+      if(top < c.scrollTop || top+el.offsetHeight > c.scrollTop + c.clientHeight - 8){
+        c.scrollTo({top: Math.max(0, top - c.clientHeight/2 + el.offsetHeight), behavior:'smooth'});
+      }
+    }
+  },[active]);
+  return (
+    <div ref={contRef} className="max-h-72 overflow-y-auto leading-loose text-sm text-slate-700 dark:text-slate-200 pr-2">
+      {segs.map((s,i)=>(
+        <span key={i} ref={i===active?activeRef:null} onClick={()=>onSeek(s.st)}
+          className={`cursor-pointer rounded px-0.5 transition-colors ${i===active?'bg-[#D8C3A5] text-[#004030] dark:bg-[#D8C3A5] dark:text-[#004030] font-medium':'hover:bg-slate-200/60 dark:hover:bg-slate-700/60'}`}>
+          {s.text} </span>
+      ))}
+    </div>
+  );
+}
+
+/* ===================== APP ===================== */
+function App(){
+  const [lang,setLang]=useState('en');
+  const [isDark,setIsDark]=useState(true);
+  const [menuOpen,setMenuOpen]=useState(false);
+  const [section,setSection]=useState(0);
+  const t=DICT[lang];
+
+  // analysis state
+  const [fileName,setFileName]=useState('');
+  const [modelKey,setModelKey]=useState('tiny');
+  const [busy,setBusy]=useState(false);
+  const [stage,setStage]=useState('');
+  const [dlPct,setDlPct]=useState(0);
+  const [err,setErr]=useState('');
+  const [warn,setWarn]=useState('');
+  const [result,setResult]=useState(null);
+  const [peaks,setPeaks]=useState(null);
+  const [pauseMarks,setPauseMarks]=useState([]);
+  const [audioUrl,setAudioUrl]=useState('');
+  const [curTime,setCurTime]=useState(0);
+  const [playing,setPlaying]=useState(false);
+  const [ttsOn,setTtsOn]=useState(false);
+  const [editing,setEditing]=useState(false);
+  const [editSegs,setEditSegs]=useState([]);
+  const [editedAt,setEditedAt]=useState(0);
+  const [reMsg,setReMsg]=useState('');
+  // live recording
+  const REC_MAX=180;
+  const [srcBlob,setSrcBlob]=useState(null);
+  const [recState,setRecState]=useState('idle'); // idle | recording | paused | stopped
+  const [recElapsed,setRecElapsed]=useState(0);
+  const [recUrl,setRecUrl]=useState('');
+  const mrRef=useRef(null), streamRef=useRef(null), chunksRef=useRef([]), blobRef=useRef(null);
+  const recTimerRef=useRef(null), segStartRef=useRef(0), accumRef=useRef(0), beepFlagsRef=useRef({f30:false,f10:false,f3:false}), beepCtxRef=useRef(null);
+
+  const audioRef=useRef(null);
+  const menuRef=useRef(null);
+  const fileRef=useRef(null);
+
+  useEffect(()=>{ document.documentElement.classList.toggle('dark',isDark); },[isDark]);
+  useEffect(()=>{ document.documentElement.lang = lang==='zh'?'zh-Hant':'en'; },[lang]);
+  useEffect(()=>{
+    const h=e=>{ if(menuRef.current && !menuRef.current.contains(e.target)) setMenuOpen(false); };
+    document.addEventListener('mousedown',h); return ()=>document.removeEventListener('mousedown',h);
+  },[]);
+  // restore last result
+  useEffect(()=>{
+    try{ const raw=localStorage.getItem('esa_last'); if(raw){ const o=JSON.parse(raw); if(o&&o.result){ setResult(o.result); setPauseMarks(o.result.pauseMarks||[]); } } }catch(e){}
+  },[]);
+  // keep editable segments in sync with the current result
+  useEffect(()=>{
+    if(result&&result.segments) setEditSegs(result.segments.map(s=>({i:s.i,st:s.st,en:s.en,text:s.text})));
+    else setEditSegs([]);
+  },[result]);
+
+  // audio events (re-bind when the active <audio> element changes between sections)
+  useEffect(()=>{
+    const a=audioRef.current; if(!a) return;
+    setCurTime(a.currentTime||0);
+    const tick=()=>setCurTime(a.currentTime);
+    const onEnd=()=>setPlaying(false);
+    const onPause=()=>setPlaying(false); const onPlay=()=>setPlaying(true);
+    a.addEventListener('timeupdate',tick); a.addEventListener('ended',onEnd); a.addEventListener('pause',onPause); a.addEventListener('play',onPlay);
+    return ()=>{ a.removeEventListener('timeupdate',tick); a.removeEventListener('ended',onEnd); a.removeEventListener('pause',onPause); a.removeEventListener('play',onPlay); };
+  },[audioUrl,section]);
+
+  // TTS
+  const stopTts=()=>{ try{speechSynthesis.cancel();}catch(e){} setTtsOn(false); };
+  useEffect(()=>{ stopTts(); },[section,lang]);
+  const speak=()=>{
+    if(ttsOn){ stopTts(); return; }
+    const map={0:[t.home_lead,t.home_body,t.home_privacy],1:[t.up_title,t.up_desc,t.up_filehint,t.up_note],2:[t.sc_title,t.sc_desc],3:[t.tl_title,t.tl_desc],4:[t.fb_title,t.fb_desc],5:[t.me_title,t.me_desc,t.me_engine_b,t.me_band_b,t.me_limits_b]};
+    const txt=(map[section]||[]).filter(Boolean).join('. ');
+    const u=new SpeechSynthesisUtterance(txt); u.rate=0.95;
+    const vs=speechSynthesis.getVoices();
+    if(lang==='zh'){ const v=vs.find(v=>v.lang==='zh-TW'&&v.name.includes('Yating'))||vs.find(v=>v.lang==='zh-TW')||vs.find(v=>v.lang.startsWith('zh')); if(v)u.voice=v; u.lang='zh-TW'; }
+    else { const v=vs.find(v=>v.lang==='en-GB'&&(v.name.includes('Daniel')||v.name.includes('Male')))||vs.find(v=>v.lang==='en-GB')||vs.find(v=>v.lang.startsWith('en')); if(v)u.voice=v; u.lang='en-GB'; }
+    u.onend=()=>setTtsOn(false); u.onerror=()=>setTtsOn(false);
+    speechSynthesis.speak(u); setTtsOn(true);
+  };
+
+  // pick file
+  // unify audio source (uploaded file OR saved recording)
+  const setSource=(blob,name)=>{
+    const same = result && result.__src===name;
+    if(audioUrl) URL.revokeObjectURL(audioUrl);
+    setSrcBlob(blob); setFileName(name); setErr('');
+    setWarn(blob.size > 25*1024*1024 ? t.up_toobig : '');
+    setAudioUrl(URL.createObjectURL(blob));
+    if(!same){ setResult(null); setEditSegs([]); setPeaks(null); setReMsg(''); setEditing(false); setEditedAt(0); setStage(''); }
+  };
+  const onPick=e=>{ const f=e.target.files&&e.target.files[0]; if(!f) return; setSource(f,f.name); };
+
+  // short warning beeps via Web Audio
+  const beep=(n)=>{
+    try{
+      let ctx=beepCtxRef.current; if(!ctx){ ctx=new (window.AudioContext||window.webkitAudioContext)(); beepCtxRef.current=ctx; }
+      if(ctx.state==='suspended') ctx.resume();
+      const dur=0.12, gap=0.17;
+      for(let i=0;i<n;i++){
+        const t0=ctx.currentTime + i*gap;
+        const osc=ctx.createOscillator(), g=ctx.createGain();
+        osc.type='sine'; osc.frequency.value=880;
+        g.gain.setValueAtTime(0.0001,t0); g.gain.exponentialRampToValueAtTime(0.25,t0+0.01); g.gain.exponentialRampToValueAtTime(0.0001,t0+dur);
+        osc.connect(g); g.connect(ctx.destination); osc.start(t0); osc.stop(t0+dur+0.02);
+      }
+    }catch(e){}
+  };
+  const startTimer=()=>{
+    clearInterval(recTimerRef.current);
+    recTimerRef.current=setInterval(()=>{
+      const el=accumRef.current + (Date.now()-segStartRef.current)/1000;
+      setRecElapsed(el);
+      const rem=REC_MAX-el, f=beepFlagsRef.current;
+      if(rem<=30 && !f.f30){ f.f30=true; beep(1); }
+      if(rem<=10 && !f.f10){ f.f10=true; beep(2); }
+      if(rem<=3 && !f.f3){ f.f3=true; beep(3); }
+      if(el>=REC_MAX) stopRec();
+    },200);
+  };
+  const startRec=async()=>{
+    setErr('');
+    try{
+      const stream=await navigator.mediaDevices.getUserMedia({audio:true});
+      streamRef.current=stream;
+      let opts={}; try{ if(window.MediaRecorder&&MediaRecorder.isTypeSupported&&MediaRecorder.isTypeSupported('audio/webm')) opts={mimeType:'audio/webm'}; }catch(e){}
+      const mr=new MediaRecorder(stream,opts); mrRef.current=mr; chunksRef.current=[];
+      mr.ondataavailable=e=>{ if(e.data&&e.data.size) chunksRef.current.push(e.data); };
+      mr.onstop=()=>{
+        const blob=new Blob(chunksRef.current,{type:mr.mimeType||'audio/webm'});
+        blobRef.current=blob;
+        if(recUrl) URL.revokeObjectURL(recUrl);
+        setRecUrl(URL.createObjectURL(blob)); setRecState('stopped');
+        if(streamRef.current) streamRef.current.getTracks().forEach(tr=>tr.stop());
+      };
+      accumRef.current=0; segStartRef.current=Date.now(); beepFlagsRef.current={f30:false,f10:false,f3:false};
+      setRecElapsed(0); setRecState('recording'); mr.start(1000); startTimer();
+    }catch(e){ setErr(t.rec_denied); }
+  };
+  const pauseRec=()=>{ const mr=mrRef.current; if(!mr)return; try{mr.pause();}catch(e){} accumRef.current+=(Date.now()-segStartRef.current)/1000; clearInterval(recTimerRef.current); setRecState('paused'); };
+  const resumeRec=()=>{ const mr=mrRef.current; if(!mr)return; try{mr.resume();}catch(e){} segStartRef.current=Date.now(); setRecState('recording'); startTimer(); };
+  const stopRec=()=>{ clearInterval(recTimerRef.current); const mr=mrRef.current; if(mr&&mr.state!=='inactive'){ try{mr.stop();}catch(e){ setRecState('stopped'); } } else setRecState('stopped'); };
+  const discardRec=()=>{ if(recUrl) URL.revokeObjectURL(recUrl); setRecUrl(''); blobRef.current=null; setRecState('idle'); setRecElapsed(0); };
+  const saveRec=()=>{
+    const blob=blobRef.current; if(!blob) return;
+    const ext=(blob.type.includes('webm')?'webm':blob.type.includes('mp4')||blob.type.includes('mp4a')?'m4a':blob.type.includes('ogg')?'ogg':'webm');
+    const d=new Date(), p=n=>String(n).padStart(2,'0');
+    const name=`recording_${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.${ext}`;
+    setSource(blob,name); setStage(t.rec_saved);
+    if(recUrl) URL.revokeObjectURL(recUrl); setRecUrl(''); setRecState('idle'); setRecElapsed(0);
+  };
+  useEffect(()=>()=>{ clearInterval(recTimerRef.current); if(streamRef.current) streamRef.current.getTracks().forEach(tr=>tr.stop()); },[]);
+
+  // main run
+  const run=async()=>{
+    if(!srcBlob){ fileRef.current&&fileRef.current.click(); return; }
+    setBusy(true); setErr(''); setDlPct(0);
+    try{
+      setStage(t.up_decode);
+      const dec=await decodeTo16k(srcBlob);
+      setPeaks(dec.peaks);
+      setStage(t.up_dl);
+      const asr=await transcribe(dec.audio16k, MODELS[modelKey], (p)=>{ setDlPct(p); setStage(t.up_transcribe); });
+      setStage(t.up_analyze);
+      asr.__audioDuration=dec.duration;
+      const r=analyze(asr);
+      r.__src=fileName;
+      setResult(r); setPauseMarks(r.pauseMarks||[]); setEditedAt(0);
+      try{ localStorage.setItem('esa_last', JSON.stringify({result:r, ts:Date.now()})); }catch(e){}
+      setStage(t.up_done);
+    }catch(e){ console.error(e); setErr(t.up_err+' ('+(e&&e.message||e)+')'); setStage(''); }
+    setBusy(false);
+  };
+
+  const seek=time=>{ const a=audioRef.current; if(a){ a.currentTime=Math.max(0,Math.min(time,a.duration||time)); setCurTime(a.currentTime); } };
+  const togglePlay=()=>{ const a=audioRef.current; if(!a)return; if(a.paused)a.play(); else a.pause(); };
+  const stop=()=>{ const a=audioRef.current; if(!a)return; a.pause(); a.currentTime=0; setCurTime(0); };
+  const toggleEdit=()=>{ if(editing) setEditedAt(Date.now()); setEditing(!editing); setReMsg(''); };
+  const playSeg=s=>{ const a=audioRef.current; if(!a)return; a.currentTime=s.st; a.play(); };
+
+  // re-analyze using the edited transcript (keeps original timestamps)
+  const reAnalyze=()=>{
+    if(!editSegs.length||!result) return;
+    const chunks=editSegs.map(s=>({text:s.text||'', timestamp:[s.st,s.en]}));
+    const asr={ text:chunks.map(c=>c.text).join(' '), chunks, __audioDuration:result.duration };
+    const r=analyze(asr);
+    r.__src=result.__src;
+    setResult(r); setPauseMarks(r.pauseMarks||[]);
+    try{ localStorage.setItem('esa_last', JSON.stringify({result:r, ts:Date.now()})); }catch(e){}
+    setEditing(false); setReMsg(t.tl_reanalyzed);
+  };
+
+  // export edited transcript as SubRip (.srt)
+  const pad2=n=>String(n).padStart(2,'0');
+  const srtTime=s=>{ s=Math.max(0,s); const tot=Math.floor(s); const ms=Math.round((s-tot)*1000);
+    return pad2(Math.floor(tot/3600))+':'+pad2(Math.floor(tot%3600/60))+':'+pad2(tot%60)+','+String(ms).padStart(3,'0'); };
+  const exportSRT=()=>{
+    const segs=(editSegs.length?editSegs:result.segments);
+    const body=segs.map((s,i)=>`${i+1}\n${srtTime(s.st)} --> ${srtTime(s.en)}\n${(s.text||'').trim()}`).join('\n\n')+'\n';
+    const blob=new Blob([body],{type:'text/plain;charset=utf-8'});
+    const url=URL.createObjectURL(blob); const a=document.createElement('a');
+    a.href=url; a.download=(fileName?fileName.replace(/\.[^.]+$/,''):'transcript')+'.srt';
+    document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(url),1000);
+  };
+
+  const navTo=i=>{ setSection(i); setMenuOpen(false); window.scrollTo({top:0,behavior:'smooth'}); };
+
+  const flagColor={fast:'bg-rose-500/15 text-rose-600 dark:text-rose-400', slow:'bg-sky-500/15 text-sky-600 dark:text-sky-400', pause:'bg-amber-500/15 text-amber-600 dark:text-amber-400', filler:'bg-violet-500/15 text-violet-600 dark:text-violet-400'};
+  const flagLabel=k=>({fast:t.tl_fast,slow:t.tl_slow,pause:t.tl_pauseflag,filler:t.tl_fillerflag}[k]);
+
+  const fb = result ? buildFeedback(result, lang) : null;
+
+  return (
+    <div className="min-h-screen flex flex-col pt-16">
+      {/* HEADER */}
+      <header className="fixed top-0 left-0 right-0 h-16 bg-[#004030] dark:bg-slate-900 text-white z-50 shadow-lg border-b border-[#D8C3A5]/30">
+        <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
+          <div className="flex items-center gap-1 sm:gap-2">
+            <div className="relative" ref={menuRef}>
+              <button onClick={()=>setMenuOpen(!menuOpen)} className="p-2 hover:bg-white/10 rounded-lg" aria-label="menu"><Ic.menu/></button>
+              {menuOpen&&(
+                <div className="absolute top-full left-0 mt-1 w-64 max-w-[calc(100vw-2rem)] max-h-[calc(100vh-5rem)] overflow-y-auto bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100 rounded-xl shadow-2xl border border-slate-200 dark:border-slate-700 z-[100] py-1">
+                  {t.nav.map((label,i)=>{const I=NAV_ICONS[i];return(
+                    <button key={i} onClick={()=>navTo(i)} className={`w-full flex items-center gap-3 px-4 py-3 text-sm hover:bg-slate-100 dark:hover:bg-slate-700 ${section===i?'text-[#004030] dark:text-[#D8C3A5] font-bold':''}`}>
+                      <span className="w-5 flex justify-center">{I&&I()}</span>
+                      <span className="text-xs opacity-50">{i}</span>
+                      <span className="truncate">{label}</span>
+                    </button>);})}
+                </div>
+              )}
+            </div>
+            <button onClick={()=>navTo(0)} className="p-2 hover:bg-white/10 rounded-lg" aria-label="home"><Ic.home/></button>
+            <button onClick={()=>window.scrollTo({top:0,behavior:'smooth'})} className="flex items-center gap-2">
+              <span className="font-serif font-black text-[#D8C3A5] text-lg tracking-widest">{t.brand}</span>
+              <span className="hidden sm:inline font-serif font-bold text-sm md:text-base">{t.title}</span>
+            </button>
+          </div>
+          <div className="flex items-center gap-1 sm:gap-2">
+            <button onClick={speak} className="px-2 py-1.5 rounded-lg hover:bg-white/10 flex items-center gap-1 text-xs" title={t.tts_play}>
+              {ttsOn?<Ic.stop/>:<Ic.play/>}<span className="hidden sm:inline">{ttsOn?t.tts_stop:t.tts_play}</span>
+            </button>
+            <button onClick={()=>setLang(lang==='en'?'zh':'en')} className="px-2.5 py-1.5 rounded-lg hover:bg-white/10 text-xs font-bold border border-white/20">{t.lang_btn}</button>
+            <button onClick={()=>setIsDark(!isDark)} className="p-2 rounded-lg hover:bg-white/10" aria-label="theme">{isDark?<Ic.sun/>:<Ic.moon/>}</button>
+          </div>
+        </div>
+      </header>
+
+      {/* MAIN */}
+      <main className="flex-1 w-full max-w-5xl mx-auto px-4 sm:px-6 py-8">
+        <div className="flex justify-between items-center mb-5">
+          <button onClick={()=>navTo(Math.max(0,section-1))} disabled={section===0} className="text-sm font-semibold text-[#004030] dark:text-[#D8C3A5] disabled:opacity-30 disabled:cursor-default flex items-center gap-1">{t.nav_prev}</button>
+          <span className="text-xs text-slate-400">{section===0?t.nav[0]:`${section} · ${t.nav[section]}`}</span>
+          <button onClick={()=>navTo(Math.min(5,section+1))} disabled={section===5} className="text-sm font-semibold text-[#004030] dark:text-[#D8C3A5] disabled:opacity-30 disabled:cursor-default flex items-center gap-1">{t.nav_next}</button>
+        </div>
+        <div key={section} className="animate-fade-in">
+        {/* ===== SECTION 0: HOME ===== */}
+        {section===0&&(
+          <div>
+            <div className="rounded-2xl bg-gradient-to-br from-[#004030] to-[#0a5a44] dark:from-slate-800 dark:to-slate-900 text-white p-8 sm:p-12 shadow-xl border border-[#D8C3A5]/20">
+              <p className="text-[#D8C3A5] font-semibold tracking-wide text-sm mb-2">{t.home_lead}</p>
+              <h1 className="font-serif font-black text-3xl sm:text-4xl leading-tight mb-4">{t.title}</h1>
+              <p className="text-white/90 leading-relaxed max-w-2xl">{t.home_hero}</p>
+              <p className="mt-5 inline-flex items-center gap-2 text-sm bg-[#D8C3A5]/15 text-[#D8C3A5] px-3 py-1.5 rounded-full">🔒 {t.home_privacy}</p>
+              <div className="mt-6">
+                <button onClick={()=>navTo(1)} className="bg-[#D8C3A5] text-[#004030] font-bold px-6 py-3 rounded-xl hover:brightness-105 shadow-lg">{t.home_start}</button>
+              </div>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-6">
+              {[[t.stat_inbrowser,t.stat_inbrowser_d],[t.stat_dims,t.stat_dims_d],[t.stat_free,t.stat_free_d]].map((s,i)=>(
+                <div key={i} className="bg-white dark:bg-slate-800 rounded-xl p-5 border border-slate-200 dark:border-slate-700">
+                  <div className="font-serif font-black text-xl text-[#004030] dark:text-[#D8C3A5]">{s[0]}</div>
+                  <div className="text-sm text-slate-500 dark:text-slate-400 mt-1">{s[1]}</div>
+                </div>
+              ))}
+            </div>
+            <div className="bg-white dark:bg-slate-800 rounded-2xl p-6 sm:p-8 mt-6 border border-slate-200 dark:border-slate-700">
+              <p className="leading-relaxed text-slate-600 dark:text-slate-300">{t.home_body}</p>
+              <h3 className="font-serif font-bold text-lg mt-6 mb-3 text-[#004030] dark:text-[#D8C3A5]">{t.home_scope_t}</h3>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <ul className="space-y-1.5">{t.home_does.map((x,i)=><li key={i} className="flex items-start gap-2 text-sm"><span className="text-emerald-500 mt-0.5">✓</span><span>{x}</span></li>)}</ul>
+                </div>
+                <div>
+                  <ul className="space-y-1.5">{t.home_doesnot.map((x,i)=><li key={i} className="flex items-start gap-2 text-sm"><span className="text-rose-400 mt-0.5">✕</span><span>{x}</span></li>)}</ul>
+                  <p className="text-xs text-slate-400 mt-2">{t.home_doesnot_note}</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ===== SECTION 1: UPLOAD ===== */}
+        {section===1&&(
+          <div>
+            <SectionHead n="1" icon={Ic.upload} title={t.up_title} desc={t.up_desc}/>
+            <div className="bg-white dark:bg-slate-800 rounded-2xl p-6 border border-slate-200 dark:border-slate-700">
+              <div className="flex flex-col sm:flex-row gap-4 sm:items-end">
+                <div className="flex-1">
+                  <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1">{t.up_choose}</label>
+                  <input ref={fileRef} type="file" accept="audio/*,.mp3,.wav,.m4a,.ogg,.webm" onChange={onPick}
+                    className="block w-full text-sm text-slate-600 dark:text-slate-300 file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border-0 file:bg-[#004030] file:text-white dark:file:bg-[#D8C3A5] dark:file:text-[#004030] file:font-semibold file:cursor-pointer"/>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1">{t.up_model}</label>
+                  <select value={modelKey} onChange={e=>setModelKey(e.target.value)} className="rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 px-3 py-2 text-sm">
+                    <option value="tiny">{t.up_model_tiny}</option>
+                    <option value="base">{t.up_model_base}</option>
+                  </select>
+                </div>
+              </div>
+              <p className="text-xs text-slate-400 mt-3">{t.up_filehint}</p>
+              {warn&&<p className="text-xs text-amber-500 mt-1">⚠ {warn}</p>}
+
+              <div className="mt-5 border-t border-slate-200 dark:border-slate-700 pt-5">
+                <div className="flex items-center justify-between mb-1">
+                  <h4 className="font-semibold text-sm flex items-center gap-2"><span className="w-2 h-2 rounded-full bg-rose-500"></span>{t.rec_title}</h4>
+                  <span className="text-xs text-slate-400">{t.rec_max}</span>
+                </div>
+                <p className="text-xs text-slate-400 mb-3">{t.rec_hint}</p>
+                {recState==='idle'&&(
+                  <button onClick={startRec} className="bg-rose-600 hover:bg-rose-700 text-white font-semibold px-5 py-2.5 rounded-xl flex items-center gap-2 text-sm">
+                    <span className="w-2.5 h-2.5 rounded-full bg-white"></span>{t.rec_start}
+                  </button>
+                )}
+                {(recState==='recording'||recState==='paused')&&(
+                  <div className="flex flex-wrap items-center gap-3">
+                    <span className="flex items-center gap-2 text-sm font-semibold">
+                      <span className={`w-2.5 h-2.5 rounded-full ${recState==='recording'?'bg-rose-600 animate-pulse':'bg-amber-500'}`}></span>
+                      {recState==='recording'?t.rec_recording:t.rec_paused}
+                    </span>
+                    <span className="font-mono text-sm">{fmtTime(recElapsed)}<span className="text-slate-400"> / {fmtTime(REC_MAX)}</span></span>
+                    <span className="text-xs text-slate-400">{t.rec_remaining}: {fmtTime(Math.max(0,REC_MAX-recElapsed))}</span>
+                    {recState==='recording'
+                      ? <button onClick={pauseRec} className="border border-slate-300 dark:border-slate-600 px-3 py-2 rounded-lg text-sm font-semibold">{t.rec_pause}</button>
+                      : <button onClick={resumeRec} className="border border-slate-300 dark:border-slate-600 px-3 py-2 rounded-lg text-sm font-semibold">{t.rec_resume}</button>}
+                    <button onClick={stopRec} className="bg-[#004030] dark:bg-[#D8C3A5] text-white dark:text-[#004030] px-3 py-2 rounded-lg text-sm font-semibold flex items-center gap-1"><Ic.stop/>{t.rec_stop}</button>
+                    <div className="w-full h-1.5 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden"><div className="h-full bg-rose-500 transition-all" style={{width:Math.min(100,recElapsed/REC_MAX*100)+'%'}}></div></div>
+                  </div>
+                )}
+                {recState==='stopped'&&(
+                  <div className="flex flex-wrap items-center gap-3">
+                    <span className="text-sm font-mono">{fmtTime(recElapsed)}</span>
+                    {recUrl&&<audio src={recUrl} controls className="h-9 max-w-[220px]"/>}
+                    <button onClick={discardRec} className="border border-rose-400 text-rose-600 dark:text-rose-400 px-4 py-2 rounded-lg text-sm font-semibold">{t.rec_discard}</button>
+                    <button onClick={saveRec} className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-semibold">{t.rec_save}</button>
+                  </div>
+                )}
+              </div>
+
+              {audioUrl&&<audio ref={audioRef} src={audioUrl} className="w-full mt-4" controls/>}
+              <div className="mt-5 flex items-center gap-3 flex-wrap">
+                <button onClick={run} disabled={busy} className="bg-[#004030] dark:bg-[#D8C3A5] text-white dark:text-[#004030] font-bold px-6 py-3 rounded-xl disabled:opacity-50 flex items-center gap-2">
+                  {busy&&<svg className="spin" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12a9 9 0 1 1-6.2-8.5"/></svg>}
+                  {busy?t.up_running:t.up_run}
+                </button>
+                {busy&&<span className="text-sm text-slate-500">{stage}{dlPct>0&&dlPct<100?` ${dlPct}%`:''}</span>}
+                {!busy&&(stage===t.up_done||stage===t.rec_saved)&&<span className="text-sm text-emerald-600 dark:text-emerald-400">{stage}</span>}
+                {!busy&&result&&<button onClick={()=>navTo(2)} className="text-sm font-semibold text-[#004030] dark:text-[#D8C3A5] underline">{t.sc_goto}</button>}
+              </div>
+              {err&&<p className="text-sm text-rose-500 mt-3">{err}</p>}
+              <p className="text-xs text-slate-400 mt-4 border-t border-slate-200 dark:border-slate-700 pt-3">{t.up_note}</p>
+            </div>
+            {result&&audioUrl&&(editSegs.length||result.segments.length)&&(
+              <div className="bg-white dark:bg-slate-800 rounded-2xl p-6 mt-6 border border-slate-200 dark:border-slate-700">
+                <h3 className="font-serif font-bold text-lg mb-1 text-[#004030] dark:text-[#D8C3A5]">{t.up_transcript}</h3>
+                <p className="text-xs text-slate-400 mb-3">{t.up_follow_hint}</p>
+                <FollowTranscript segs={editSegs.length?editSegs:result.segments} curTime={curTime} onSeek={seek}/>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ===== SECTION 2: SCORECARD ===== */}
+        {section===2&&(
+          <div>
+            <SectionHead n="2" icon={Ic.chart} title={t.sc_title} desc={t.sc_desc}/>
+            {!result?<Empty text={t.sc_none} onGo={()=>navTo(1)} label={t.home_start}/>:(
+              <div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div className="bg-white dark:bg-slate-800 rounded-2xl p-6 border border-slate-200 dark:border-slate-700 flex flex-col items-center justify-center">
+                    <RadarChart dims={result.dims} t={t}/>
+                    <div className="mt-2 text-center">
+                      <div className="text-xs uppercase tracking-wide text-slate-500">{t.sc_overall}</div>
+                      <div className="font-serif font-black text-5xl text-[#004030] dark:text-[#D8C3A5]">{result.overall}<span className="text-xl text-slate-400">/10</span></div>
+                    </div>
+                  </div>
+                  <div className="bg-white dark:bg-slate-800 rounded-2xl p-6 border border-slate-200 dark:border-slate-700">
+                    <ScoreBar label={t.dim_fluency} score={result.dims[0].score} basis={t.dim_fluency_b}/>
+                    <ScoreBar label={t.dim_pacing} score={result.dims[1].score} basis={t.dim_pacing_b}/>
+                    <ScoreBar label={t.dim_structure} score={result.dims[2].score} basis={t.dim_structure_b}/>
+                    <ScoreBar label={t.dim_lexis} score={result.dims[3].score} basis={t.dim_lexis_b}/>
+                    <ScoreBar label={t.dim_cohesion} score={result.dims[4].score} basis={t.dim_cohesion_b}/>
+                  </div>
+                </div>
+                <h3 className="font-serif font-bold text-lg mt-8 mb-3 text-[#004030] dark:text-[#D8C3A5]">{t.sc_metrics}</h3>
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+                  <Metric label={t.m_words} value={result.totalWords} unit=""/>
+                  <Metric label={t.m_dur} value={fmtTime(result.duration)} unit=""/>
+                  <Metric label={t.m_wpm} value={result.wpm} unit={t.m_wpm_u}/>
+                  <Metric label={t.m_filler} value={result.fillerPer100} unit={t.m_filler_u}/>
+                  <Metric label={t.m_pause} value={result.pauseCount} unit={t.m_pause_u}/>
+                  <Metric label={t.m_pauseratio} value={result.pauseRatio+'%'} unit=""/>
+                  <Metric label={t.m_ttr} value={result.guiraud} unit=""/>
+                  <Metric label={t.m_conn} value={result.connPer100} unit={t.m_conn_u}/>
+                  <Metric label={t.m_sent} value={result.sentCount} unit=""/>
+                  <Metric label={t.m_avgsent} value={result.avgSent} unit=""/>
+                  <Metric label={t.m_long} value={result.longSent} unit=""/>
+                  <Metric label={t.m_signpost} value={result.catPresent+'/6'} unit=""/>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ===== SECTION 3: TIMELINE ===== */}
+        {section===3&&(
+          <div>
+            <SectionHead n="3" icon={Ic.wave} title={t.tl_title} desc={t.tl_desc}/>
+            {!result?<Empty text={t.tl_none} onGo={()=>navTo(1)} label={t.home_start}/>:(
+              <div>
+                <div className="bg-white dark:bg-slate-800 rounded-2xl p-5 border border-slate-200 dark:border-slate-700">
+                  {peaks&&<Waveform peaks={peaks} pauseMarks={pauseMarks} duration={result.duration} currentTime={curTime} onSeek={seek}/>}
+                  <div className="flex items-center gap-3 mt-3 flex-wrap">
+                    {audioUrl&&<button onClick={togglePlay} className="bg-[#004030] dark:bg-[#D8C3A5] text-white dark:text-[#004030] font-semibold px-4 py-2 rounded-lg flex items-center gap-2 text-sm">{playing?<Ic.pause/>:<Ic.play/>}{playing?t.tl_pause:t.tl_play}</button>}
+                    {audioUrl&&<button onClick={stop} className="border border-slate-300 dark:border-slate-600 font-semibold px-3 py-2 rounded-lg flex items-center gap-2 text-sm"><Ic.stop/>{t.tl_stop}</button>}
+                    <span className="text-sm text-slate-500 font-mono">{fmtTime(curTime)} / {fmtTime(result.duration)}</span>
+                    <span className="ml-auto flex items-center gap-3 text-xs">
+                      {['fast','slow','pause','filler'].map(k=><span key={k} className={`px-2 py-0.5 rounded ${flagColor[k]}`}>{flagLabel(k)}</span>)}
+                    </span>
+                  </div>
+                  {!audioUrl&&<p className="text-xs text-amber-500 mt-2">↳ {lang==='en'?'Re-select the audio file in “Upload” to enable playback.':'請於「上傳」重新選取音訊檔以啟用播放。'}</p>}
+                </div>
+                <div className="flex flex-wrap items-center gap-2 mt-4">
+                  <button onClick={toggleEdit} className={`px-4 py-2 rounded-lg text-sm font-semibold border ${editing?'bg-amber-500 text-white border-amber-500':'border-[#004030] text-[#004030] dark:border-[#D8C3A5] dark:text-[#D8C3A5]'}`}>{editing?t.tl_doneedit:t.tl_edit}</button>
+                  {!editing&&editedAt>0&&<span className="text-xs text-slate-500 dark:text-slate-400">{t.tl_editedat} {new Date(editedAt).toLocaleString(lang==='zh'?'zh-TW':'en-GB')}</span>}
+                  <button onClick={reAnalyze} className="px-4 py-2 rounded-lg text-sm font-semibold bg-[#004030] dark:bg-[#D8C3A5] text-white dark:text-[#004030]">{t.tl_reanalyze}</button>
+                  <button onClick={exportSRT} className="px-4 py-2 rounded-lg text-sm font-semibold border border-slate-300 dark:border-slate-600">⬇ {t.tl_srt}</button>
+                </div>
+                {reMsg&&(
+                  <div className="flex flex-wrap items-center gap-3 mt-3 bg-emerald-500/10 border border-emerald-500/30 rounded-xl px-4 py-3">
+                    <span className="text-sm text-emerald-700 dark:text-emerald-400">{reMsg}</span>
+                    <span className="text-sm font-semibold">{t.tl_total} <span className="font-serif font-black text-lg text-[#004030] dark:text-[#D8C3A5]">{result.overall}</span><span className="text-xs text-slate-400">/10</span></span>
+                    <button onClick={()=>navTo(2)} className="ml-auto bg-[#004030] dark:bg-[#D8C3A5] text-white dark:text-[#004030] font-semibold px-4 py-2 rounded-lg text-sm">{t.tl_viewscore}</button>
+                  </div>
+                )}
+                {editing&&<p className="text-xs text-amber-500 mt-2">✎ {t.tl_editing}</p>}
+                <div className="bg-white dark:bg-slate-800 rounded-2xl mt-6 border border-slate-200 dark:border-slate-700 overflow-hidden">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead className="bg-slate-100 dark:bg-slate-900 text-left text-xs uppercase tracking-wide text-slate-500">
+                        <tr><th className="px-3 py-2">{t.tl_seg}</th><th className="px-3 py-2">{t.tl_time}</th><th className="px-3 py-2">{t.tl_wpm}</th><th className="px-3 py-2">{t.tl_text}</th><th className="px-3 py-2">{t.tl_flags}</th></tr>
+                      </thead>
+                      <tbody>
+                        {result.segments.map(s=>(
+                          <tr key={s.i} onClick={()=>{ if(!editing) playSeg(s); }} className={`border-t border-slate-100 dark:border-slate-700 ${editing?'':'hover:bg-slate-50 dark:hover:bg-slate-700/50 cursor-pointer'} align-top`}>
+                            <td className="px-3 py-2 text-slate-400">{s.i+1}</td>
+                            <td className="px-3 py-2 font-mono text-xs whitespace-nowrap">{fmtTime(s.st)}</td>
+                            <td className="px-3 py-2 font-mono">{s.wpm}</td>
+                            <td className="px-3 py-2 max-w-md">
+                              {editing
+                                ? <textarea value={(editSegs.find(x=>x.i===s.i)||{}).text||''} onClick={e=>e.stopPropagation()}
+                                    onChange={e=>{ const v=e.target.value; setEditSegs(es=>es.map(x=>x.i===s.i?{...x,text:v}:x)); }}
+                                    rows={2} className="w-full min-w-[200px] bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded px-2 py-1 text-sm"/>
+                                : s.text}
+                            </td>
+                            <td className="px-3 py-2"><div className="flex flex-wrap gap-1">{s.flags.map(fl=><span key={fl} className={`px-1.5 py-0.5 rounded text-[10px] ${flagColor[fl]}`}>{flagLabel(fl)}</span>)}</div></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ===== SECTION 4: FEEDBACK ===== */}
+        {section===4&&(
+          <div>
+            <SectionHead n="4" icon={Ic.fb} title={t.fb_title} desc={t.fb_desc}/>
+            {!result?<Empty text={t.fb_none} onGo={()=>navTo(1)} label={t.home_start}/>:(
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="bg-white dark:bg-slate-800 rounded-2xl p-6 border border-slate-200 dark:border-slate-700">
+                  <h3 className="font-serif font-bold text-lg mb-3 text-emerald-600 dark:text-emerald-400">✓ {t.fb_strength}</h3>
+                  <ul className="space-y-2">{fb.S.map((x,i)=><li key={i} className="text-sm flex gap-2"><span className="text-emerald-500">•</span><span>{x}</span></li>)}</ul>
+                </div>
+                <div className="bg-white dark:bg-slate-800 rounded-2xl p-6 border border-slate-200 dark:border-slate-700">
+                  <h3 className="font-serif font-bold text-lg mb-3 text-amber-600 dark:text-amber-400">▲ {t.fb_improve}</h3>
+                  <ul className="space-y-2">{fb.I.map((x,i)=><li key={i} className="text-sm flex gap-2"><span className="text-amber-500">•</span><span>{x}</span></li>)}</ul>
+                </div>
+                <div className="bg-white dark:bg-slate-800 rounded-2xl p-6 border border-slate-200 dark:border-slate-700 md:col-span-2">
+                  <h3 className="font-serif font-bold text-lg mb-3 text-[#004030] dark:text-[#D8C3A5]">{t.fb_signpost}</h3>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    {Object.keys(result.signpost).map(k=>{const ok=result.signpost[k]>0;return(
+                      <div key={k} className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm ${ok?'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400':'bg-slate-100 dark:bg-slate-900 text-slate-400'}`}>
+                        <span>{ok?'✓':'○'}</span><span className="capitalize">{k}</span>
+                        <span className="ml-auto text-xs opacity-70">{ok?`×${result.signpost[k]}`:t.fb_missing}</span>
+                      </div>);})}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ===== SECTION 5: METHODOLOGY ===== */}
+        {section===5&&(
+          <div>
+            <SectionHead n="5" icon={Ic.book} title={t.me_title} desc={t.me_desc}/>
+            <div className="space-y-4">
+              {[[t.me_engine,t.me_engine_b],[t.me_band,t.me_band_b],[t.me_limits,t.me_limits_b]].map((b,i)=>(
+                <div key={i} className="bg-white dark:bg-slate-800 rounded-2xl p-6 border border-slate-200 dark:border-slate-700">
+                  <h3 className="font-serif font-bold text-base mb-2 text-[#004030] dark:text-[#D8C3A5]">{b[0]}</h3>
+                  <p className="text-sm text-slate-600 dark:text-slate-300 leading-relaxed">{b[1]}</p>
+                </div>
+              ))}
+              <div className="bg-white dark:bg-slate-800 rounded-2xl p-6 border border-slate-200 dark:border-slate-700">
+                <h3 className="font-serif font-bold text-base mb-3 text-[#004030] dark:text-[#D8C3A5]">{t.me_formulas}</h3>
+                <ul className="space-y-2 text-sm font-mono text-slate-600 dark:text-slate-300">
+                  <li>Fluency = 10 − filler_penalty − pause_penalty</li>
+                  <li>Pacing = proximity to 120–160 WPM band</li>
+                  <li>Structure = signpost_categories_present / 6 × 10</li>
+                  <li>Lexis = (Guiraud − 4) / 5 × 10,  Guiraud = types / √tokens</li>
+                  <li>Cohesion = f(connectives/100w) − long_sentence_load</li>
+                  <li>Overall = mean(5 dimensions)</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        )}
+
+        </div>{/* /animate */}
+
+        {/* bottom nav */}
+        <div className="mt-12 flex justify-between items-center pt-8 border-t border-slate-300 dark:border-slate-700">
+          <button onClick={()=>navTo(Math.max(0,section-1))} disabled={section===0} className="text-sm font-semibold text-[#004030] dark:text-[#D8C3A5] disabled:opacity-0">{t.nav_prev}</button>
+          <button onClick={()=>navTo(Math.min(5,section+1))} disabled={section===5} className="text-sm font-semibold text-[#004030] dark:text-[#D8C3A5] disabled:opacity-0">{t.nav_next}</button>
+        </div>
+      </main>
+
+      {/* hidden persistent audio if section!=1 so playback works on timeline */}
+      {audioUrl&&section!==1&&<audio ref={audioRef} src={audioUrl} className="hidden"/>}
+
+      {/* FOOTER */}
+      <footer className="h-8 bg-[#004030] flex items-center justify-between px-4 shrink-0">
+        <span className="text-[#D8C3A5]/60 text-[10px] sm:text-xs">{t.date} · {t.copyright}</span>
+        <span className="text-[#D8C3A5]/60 text-[10px] sm:text-xs flex items-center gap-3">
+          <span className="hidden sm:inline">Architect:&nbsp;<a href={t.architect_url} target="_blank" rel="noopener" className="text-[#D8C3A5] hover:text-white underline">Prof. Shihmin Lo</a></span>
+          <button onClick={()=>window.scrollTo({top:0,behavior:'smooth'})} className="text-[#D8C3A5] hover:text-white font-bold">{t.top}</button>
+        </span>
+      </footer>
+    </div>
+  );
+}
+
+function SectionHead({n,icon,title,desc}){
+  return (
+    <div className="mb-6">
+      <h2 className="font-serif font-black text-2xl sm:text-3xl text-[#004030] dark:text-[#D8C3A5] flex items-center gap-3">
+        <span className="w-9 h-9 rounded-lg bg-[#004030]/10 dark:bg-[#D8C3A5]/10 flex items-center justify-center text-[#004030] dark:text-[#D8C3A5]">{icon&&icon()}</span>
+        <span className="text-base opacity-40 font-sans">{n}</span>{title}
+      </h2>
+      <p className="text-slate-500 dark:text-slate-400 mt-2 max-w-2xl leading-relaxed">{desc}</p>
+    </div>
+  );
+}
+function Empty({text,onGo,label}){
+  return (
+    <div className="bg-white dark:bg-slate-800 rounded-2xl p-10 border border-dashed border-slate-300 dark:border-slate-600 text-center">
+      <p className="text-slate-500 dark:text-slate-400">{text}</p>
+      <button onClick={onGo} className="mt-4 bg-[#004030] dark:bg-[#D8C3A5] text-white dark:text-[#004030] font-bold px-5 py-2.5 rounded-xl">{label}</button>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
