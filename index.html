@@ -264,17 +264,18 @@ async function decodeTo16k(file){
 const dynImport = (url) => new Function('u','return import(u)')(url);
 
 let __pipe = null, __pipeName = null;
-async function transcribe(audio16k, modelId, onProgress){
+async function transcribe(audio16k, modelId, onDlProgress, onInferStart){
   const lib = await dynImport('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2');
   lib.env.allowLocalModels = false;
   lib.env.useBrowserCache = true;
   if (!__pipe || __pipeName !== modelId){
     __pipe = await lib.pipeline('automatic-speech-recognition', modelId, {
       quantized: true,
-      progress_callback: (p)=>{ if(p && p.status==='progress' && p.file && /\.onnx/.test(p.file)) onProgress(Math.round(p.progress||0)); }
+      progress_callback: (p)=>{ if(p && p.status==='progress' && p.file && /\.onnx/.test(p.file)) onDlProgress(Math.round(p.progress||0)); }
     });
     __pipeName = modelId;
   }
+  if(onInferStart) onInferStart();
   const out = await __pipe(audio16k, {
     chunk_length_s: 30,
     stride_length_s: 5,
@@ -307,6 +308,8 @@ const DICT = {
     up_choose:'Choose audio file', up_model:'Model', up_model_tiny:'Tiny — fastest', up_model_base:'Base — more accurate (slower)',
     up_run:'Transcribe & Analyze', up_running:'Working…', up_dl:'Downloading model',
     up_decode:'Decoding audio…', up_transcribe:'Transcribing in browser…', up_analyze:'Computing metrics…',
+    up_firstload_title:'First-time setup — please don’t close this tab',
+    up_firstload_body:'Downloading the speech model (one-time, cached afterwards) and then transcribing may make the page freeze or feel unresponsive for a while — this is normal, expected behaviour, not a crash. Please keep this tab open and wait; it will resume on its own.',
     up_done:'Analysis complete — see Scorecard.', up_err:'Something went wrong. Use Chrome/Edge, check your connection, and try a shorter clip.',
     up_filehint:'Best results: 30 s – 5 min, one speaker, clear recording.',
     up_toobig:'Large file — long recordings use more memory and take longer in-browser. Keep it under ~10 min for a smooth run.',
@@ -339,7 +342,7 @@ const DICT = {
 
     tl_title:'Timeline & Segments', tl_desc:'Click the waveform to seek. The segment table flags fast pace, long pauses and fillers. Click a row to play that segment.',
     tl_play:'Play', tl_pause:'Pause', tl_legend:'Flags', tl_fast:'Fast pace', tl_slow:'Slow pace', tl_pauseflag:'Long pause', tl_fillerflag:'Filler',
-    tl_seg:'Segment', tl_time:'Time', tl_wpm:'WPM', tl_text:'Transcript', tl_flags:'Flags', tl_none:'Run an analysis to see the timeline.',
+    tl_seg:'Seg.', tl_time:'Time', tl_wpm:'WPM', tl_text:'Transcript', tl_flags:'Flags', tl_none:'Run an analysis to see the timeline.',
     tl_edit:'Edit transcript', tl_doneedit:'Done editing', tl_editing:'Editing — correct any text (the tail is often where errors are), then re-analyze.',
     tl_reanalyze:'Re-analyze', tl_srt:'Export SRT', tl_reanalyzed:'Re-analyzed with your edits.',
     tl_stop:'Stop', tl_editedat:'Edited', tl_total:'Total', tl_viewscore:'View scorecard →',
@@ -380,6 +383,8 @@ const DICT = {
     up_choose:'選擇音訊檔', up_model:'模型', up_model_tiny:'Tiny — 最快', up_model_base:'Base — 較準確（較慢）',
     up_run:'轉錄並分析', up_running:'處理中…', up_dl:'下載模型中',
     up_decode:'解碼音訊中…', up_transcribe:'瀏覽器內轉錄中…', up_analyze:'計算指標中…',
+    up_firstload_title:'首次設定中——請勿關閉此分頁',
+    up_firstload_body:'下載語音模型（僅需一次，之後會快取）以及轉錄過程，可能會讓頁面暫時沒有反應或看似當機——這是正常現象，不是故障。請保持此分頁開啟並耐心等待，完成後會自動繼續。',
     up_done:'分析完成——請看評分卡。', up_err:'發生錯誤。請改用 Chrome／Edge、檢查網路連線，並嘗試較短的片段。',
     up_filehint:'最佳效果：30 秒 – 5 分鐘、單一講者、清晰錄音。',
     up_toobig:'檔案較大——長錄音會用較多記憶體、瀏覽器內處理也較久。建議控制在約 10 分鐘以內以順暢執行。',
@@ -592,6 +597,7 @@ function App(){
   const [busy,setBusy]=useState(false);
   const [stage,setStage]=useState('');
   const [dlPct,setDlPct]=useState(0);
+  const [firstLoad,setFirstLoad]=useState(false);
   const [err,setErr]=useState('');
   const [warn,setWarn]=useState('');
   const [result,setResult]=useState(null);
@@ -605,6 +611,8 @@ function App(){
   const [editSegs,setEditSegs]=useState([]);
   const [editedAt,setEditedAt]=useState(0);
   const [reMsg,setReMsg]=useState('');
+  const [stickyH,setStickyH]=useState(0);
+  const stickyRef=useRef(null);
   // live recording
   const REC_MAX=180;
   const [srcBlob,setSrcBlob]=useState(null);
@@ -733,6 +741,18 @@ function App(){
   };
   useEffect(()=>()=>{ clearInterval(recTimerRef.current); if(streamRef.current) streamRef.current.getTracks().forEach(tr=>tr.stop()); },[]);
 
+  // track the sticky waveform/controls panel's real height so the table header can stack right beneath it
+  useEffect(()=>{
+    if(!editing || section!==3){ return; }
+    const el=stickyRef.current; if(!el) return;
+    const update=()=>setStickyH(el.offsetHeight);
+    update();
+    let ro;
+    if(window.ResizeObserver){ ro=new ResizeObserver(update); ro.observe(el); }
+    window.addEventListener('resize',update);
+    return ()=>{ if(ro) ro.disconnect(); window.removeEventListener('resize',update); };
+  },[editing,section,audioUrl,peaks]);
+
   // clear everything: source audio, transcript, analysis, persisted result
   const clearAll=()=>{
     if(!(result||srcBlob||audioUrl||recState!=='idle')) return;
@@ -753,12 +773,16 @@ function App(){
   const run=async()=>{
     if(!srcBlob){ fileRef.current&&fileRef.current.click(); return; }
     setBusy(true); setErr(''); setDlPct(0);
+    const firstLoad = __pipeName!==MODELS[modelKey];
+    setFirstLoad(firstLoad);
     try{
       setStage(t.up_decode);
       const dec=await decodeTo16k(srcBlob);
       setPeaks(dec.peaks);
       setStage(t.up_dl);
-      const asr=await transcribe(dec.audio16k, MODELS[modelKey], (p)=>{ setDlPct(p); setStage(t.up_transcribe); });
+      const asr=await transcribe(dec.audio16k, MODELS[modelKey],
+        (p)=>{ setDlPct(p); setStage(t.up_dl); },
+        ()=>{ setStage(t.up_transcribe); });
       setStage(t.up_analyze);
       asr.__audioDuration=dec.duration;
       const r=analyze(asr);
@@ -767,7 +791,7 @@ function App(){
       try{ localStorage.setItem('esa_last', JSON.stringify({result:r, ts:Date.now()})); }catch(e){}
       setStage(t.up_done);
     }catch(e){ console.error(e); setErr(t.up_err+' ('+(e&&e.message||e)+')'); setStage(''); }
-    setBusy(false);
+    setBusy(false); setFirstLoad(false);
   };
 
   const seek=time=>{ const a=audioRef.current; if(a){ a.currentTime=Math.max(0,Math.min(time,a.duration||time)); setCurTime(a.currentTime); } };
@@ -956,6 +980,20 @@ function App(){
                 {!busy&&result&&<button onClick={()=>navTo(2)} className="text-sm font-semibold text-[#004030] dark:text-[#D8C3A5] underline">{t.sc_goto}</button>}
                 {(result||srcBlob||audioUrl||recState!=='idle')&&<button onClick={clearAll} className="ml-auto text-sm font-semibold text-rose-600 dark:text-rose-400 border border-rose-300 dark:border-rose-700 px-4 py-2 rounded-lg hover:bg-rose-50 dark:hover:bg-rose-950/30">🗑 {t.clr_btn}</button>}
               </div>
+              {busy&&firstLoad&&(
+                <div className="mt-4 bg-amber-50 dark:bg-amber-950/30 border border-amber-300 dark:border-amber-700/50 rounded-xl p-4">
+                  <div className="flex items-start gap-3">
+                    <span className="w-2.5 h-2.5 mt-1 rounded-full bg-amber-500 animate-pulse shrink-0"></span>
+                    <div className="flex-1">
+                      <p className="font-semibold text-sm text-amber-800 dark:text-amber-300">{t.up_firstload_title}</p>
+                      <p className="text-xs text-amber-700/80 dark:text-amber-400/80 mt-1 leading-relaxed">{t.up_firstload_body}</p>
+                      <div className="h-2 w-full rounded-full bg-amber-200/60 dark:bg-amber-900/50 overflow-hidden mt-3">
+                        <div className="h-full bg-amber-500 transition-all duration-300" style={{width:(dlPct>0?dlPct:5)+'%'}}></div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
               {err&&<p className="text-sm text-rose-500 mt-3">{err}</p>}
               <p className="text-xs text-slate-400 mt-4 border-t border-slate-200 dark:border-slate-700 pt-3">{t.up_note}</p>
             </div>
@@ -1017,7 +1055,7 @@ function App(){
             <SectionHead n="3" icon={Ic.wave} title={t.tl_title} desc={t.tl_desc}/>
             {!result?<Empty text={t.tl_none} onGo={()=>navTo(1)} label={t.home_start}/>:(
               <div>
-                <div className="bg-white dark:bg-slate-800 rounded-2xl p-5 border border-slate-200 dark:border-slate-700">
+                <div ref={stickyRef} className={`bg-white dark:bg-slate-800 rounded-2xl p-5 border border-slate-200 dark:border-slate-700 ${editing?'sticky top-16 z-30 shadow-lg':''}`}>
                   {peaks&&<Waveform peaks={peaks} pauseMarks={pauseMarks} duration={result.duration} currentTime={curTime} onSeek={seek}/>}
                   <div className="flex items-center gap-3 mt-3 flex-wrap">
                     {audioUrl&&<button onClick={togglePlay} className="bg-[#004030] dark:bg-[#D8C3A5] text-white dark:text-[#004030] font-semibold px-4 py-2 rounded-lg flex items-center gap-2 text-sm">{playing?<Ic.pause/>:<Ic.play/>}{playing?t.tl_pause:t.tl_play}</button>}
@@ -1028,14 +1066,25 @@ function App(){
                     </span>
                   </div>
                   {!audioUrl&&<p className="text-xs text-amber-500 mt-2">↳ {lang==='en'?'Re-select the audio file in “Upload” to enable playback.':'請於「上傳」重新選取音訊檔以啟用播放。'}</p>}
+                  <div className={`flex flex-wrap items-center gap-2 ${editing?'mt-3 pt-3 border-t border-slate-200 dark:border-slate-700':'hidden'}`}>
+                    <button onClick={toggleEdit} className="px-4 py-2 rounded-lg text-sm font-semibold border bg-amber-500 text-white border-amber-500">{t.tl_doneedit}</button>
+                    <button onClick={reAnalyze} className="px-4 py-2 rounded-lg text-sm font-semibold bg-[#004030] dark:bg-[#D8C3A5] text-white dark:text-[#004030]">{t.tl_reanalyze}</button>
+                    <span className="text-xs text-amber-600 dark:text-amber-400">✎ {t.tl_editing}</span>
+                  </div>
                 </div>
-                <div className="flex flex-wrap items-center gap-2 mt-4">
+                <div className={`flex flex-wrap items-center gap-2 mt-4 ${editing?'hidden':''}`}>
                   <button onClick={toggleEdit} className={`px-4 py-2 rounded-lg text-sm font-semibold border ${editing?'bg-amber-500 text-white border-amber-500':'border-[#004030] text-[#004030] dark:border-[#D8C3A5] dark:text-[#D8C3A5]'}`}>{editing?t.tl_doneedit:t.tl_edit}</button>
                   {!editing&&editedAt>0&&<span className="text-xs text-slate-500 dark:text-slate-400">{t.tl_editedat} {new Date(editedAt).toLocaleString(lang==='zh'?'zh-TW':'en-GB')}</span>}
                   <button onClick={reAnalyze} className="px-4 py-2 rounded-lg text-sm font-semibold bg-[#004030] dark:bg-[#D8C3A5] text-white dark:text-[#004030]">{t.tl_reanalyze}</button>
                   <button onClick={exportSRT} className="px-4 py-2 rounded-lg text-sm font-semibold border border-slate-300 dark:border-slate-600">⬇ {t.tl_srt}</button>
                   <button onClick={clearAll} className="ml-auto px-4 py-2 rounded-lg text-sm font-semibold text-rose-600 dark:text-rose-400 border border-rose-300 dark:border-rose-700 hover:bg-rose-50 dark:hover:bg-rose-950/30">🗑 {t.clr_btn}</button>
                 </div>
+                {editing&&(
+                  <div className="flex flex-wrap items-center gap-2 mt-4">
+                    <button onClick={exportSRT} className="px-4 py-2 rounded-lg text-sm font-semibold border border-slate-300 dark:border-slate-600">⬇ {t.tl_srt}</button>
+                    <button onClick={clearAll} className="ml-auto px-4 py-2 rounded-lg text-sm font-semibold text-rose-600 dark:text-rose-400 border border-rose-300 dark:border-rose-700 hover:bg-rose-50 dark:hover:bg-rose-950/30">🗑 {t.clr_btn}</button>
+                  </div>
+                )}
                 {reMsg&&(
                   <div className="flex flex-wrap items-center gap-3 mt-3 bg-emerald-500/10 border border-emerald-500/30 rounded-xl px-4 py-3">
                     <span className="text-sm text-emerald-700 dark:text-emerald-400">{reMsg}</span>
@@ -1043,11 +1092,21 @@ function App(){
                     <button onClick={()=>navTo(2)} className="ml-auto bg-[#004030] dark:bg-[#D8C3A5] text-white dark:text-[#004030] font-semibold px-4 py-2 rounded-lg text-sm">{t.tl_viewscore}</button>
                   </div>
                 )}
-                {editing&&<p className="text-xs text-amber-500 mt-2">✎ {t.tl_editing}</p>}
-                <div className="bg-white dark:bg-slate-800 rounded-2xl mt-6 border border-slate-200 dark:border-slate-700 overflow-hidden">
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-sm">
+                {editing&&(
+                  <div className="sticky z-20 overflow-hidden rounded-t-2xl shadow-sm mt-6 border border-slate-200 dark:border-slate-700 border-b-0" style={{top: 64+stickyH}}>
+                    <table className="w-full text-sm table-fixed">
+                      <colgroup><col className="w-12"/><col className="w-16"/><col className="w-14"/><col/><col className="w-32"/></colgroup>
                       <thead className="bg-slate-100 dark:bg-slate-900 text-left text-xs uppercase tracking-wide text-slate-500">
+                        <tr><th className="px-3 py-2">{t.tl_seg}</th><th className="px-3 py-2">{t.tl_time}</th><th className="px-3 py-2">{t.tl_wpm}</th><th className="px-3 py-2">{t.tl_text}</th><th className="px-3 py-2">{t.tl_flags}</th></tr>
+                      </thead>
+                    </table>
+                  </div>
+                )}
+                <div className={`bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 overflow-hidden ${editing?'rounded-b-2xl border-t-0':'rounded-2xl mt-6'}`}>
+                  <div className="overflow-x-auto">
+                    <table className={`w-full text-sm ${editing?'table-fixed':''}`}>
+                      {editing&&<colgroup><col className="w-12"/><col className="w-16"/><col className="w-14"/><col/><col className="w-32"/></colgroup>}
+                      <thead className={editing?'hidden':'bg-slate-100 dark:bg-slate-900 text-left text-xs uppercase tracking-wide text-slate-500'}>
                         <tr><th className="px-3 py-2">{t.tl_seg}</th><th className="px-3 py-2">{t.tl_time}</th><th className="px-3 py-2">{t.tl_wpm}</th><th className="px-3 py-2">{t.tl_text}</th><th className="px-3 py-2">{t.tl_flags}</th></tr>
                       </thead>
                       <tbody>
